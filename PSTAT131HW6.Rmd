@@ -1,0 +1,351 @@
+---
+title: "PSTAT131 HW6"
+author: "Liangchen Xia"
+date: '2022-05-25'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+## Tree-Based Models
+
+For this assignment, we will continue working with the file `"pokemon.csv"`, found in `/data`. The file is from Kaggle: <https://www.kaggle.com/abcsds/pokemon>.
+
+The [Pokémon](https://www.pokemon.com/us/) franchise encompasses video games, TV shows, movies, books, and a card game. This data set was drawn from the video game series and contains statistics about 721 Pokémon, or "pocket monsters." In Pokémon games, the user plays as a trainer who collects, trades, and battles Pokémon to (a) collect all the Pokémon and (b) become the champion Pokémon trainer.
+
+Each Pokémon has a [primary type](https://bulbapedia.bulbagarden.net/wiki/Type) (some even have secondary types). Based on their type, a Pokémon is strong against some types, and vulnerable to others. (Think rock, paper, scissors.) A Fire-type Pokémon, for example, is vulnerable to Water-type Pokémon, but strong against Grass-type.
+
+![Fig 1. Houndoom, a Dark/Fire-type canine Pokémon from Generation II.](images/houndoom.jpg){width="200"}
+
+The goal of this assignment is to build a statistical learning model that can predict the **primary type** of a Pokémon based on its generation, legendary status, and six battle statistics.
+
+**Note: Fitting ensemble tree-based models can take a little while to run. Consider running your models outside of the .Rmd, storing the results, and loading them in your .Rmd to minimize time to knit.**
+
+Read the required libraries first
+
+```{r}
+set.seed(10086)
+# load libraries
+library(corrplot)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(discrim)
+library(glmnet)
+library(janitor)
+library(rpart.plot)
+library(randomForest)
+library(ranger)
+library(vip)
+library(xgboost)
+```
+
+### Exercise 1
+
+Read in the data and set things up as in Homework 5:
+
+```{r}
+pokemon <- read_csv("data/pokemon.csv")
+pokemon
+```
+
+- Use `clean_names()`
+- Filter out the rarer Pokémon types
+- Convert `type_1` and `legendary` to factors
+
+```{r}
+#now we Clean Names
+pokemon <- pokemon %>% clean_names()
+
+
+pokemon <- pokemon %>% filter(type_1 == "Bug" | type_1 == "Fire" |
+                          type_1 == "Grass" | type_1 == "Normal" |
+                          type_1 == "Water" | type_1 == "Psychic")
+# Convert type_1, legendary, generation to factors
+pokemon$type_1 <- as.factor(pokemon$type_1)
+pokemon$generation <- as.factor(pokemon$generation)
+pokemon$legendary <- as.factor(pokemon$legendary)
+pokemon
+```
+
+Do an initial split of the data; you can choose the percentage for splitting. Stratify on the outcome variable.
+
+```{r}
+#Initial Split
+pokemon_split <- initial_split(data = pokemon,
+                            prop = 0.7,
+                            strate = type_1)
+train <- training(pokemon_split)
+test <- testing(pokemon_split)
+dim(train)
+dim(test)
+```
+
+Fold the training set using *v*-fold cross-validation, with `v = 5`. Stratify on the outcome variable.
+
+```{r}
+folds <- vfold_cv(data = train, v = 5, strata = type_1)
+```
+
+Set up a recipe to predict `type_1` with `legendary`, `generation`, `sp_atk`, `attack`, `speed`, `defense`, `hp`, and `sp_def`:
+
+- Dummy-code `legendary` and `generation`;
+- Center and scale all predictors.
+
+```{r}
+pokemon_recipe <- recipe(formula = type_1 ~ legendary + generation + sp_atk + attack + speed + defense + hp + sp_def,
+                         data = train) %>%
+  step_dummy(legendary) %>%
+  step_dummy(generation) %>% 
+  step_normalize(all_predictors())
+```
+
+### Exercise 2
+
+Create a correlation matrix of the training set, using the `corrplot` package. *Note: You can choose how to handle the continuous variables for this plot; justify your decision(s).*
+
+```{r}
+pokemon %>% select(is.numeric) %>% cor() %>% corrplot(type = "lower")
+```
+
+What relationships, if any, do you notice? Do these relationships make sense to you?
+
+First, as the graph we could know the number is useless to help us check. It's just the pokemon number. When we see the total, all of the varibale is positively correlated. Like hp, attack, defense, sp_atk, sp_def and speed. And there is not too strong realstionship between those variables. Sp_def and defense have higher positively correlated than other. 
+
+### Exercise 3
+
+First, set up a decision tree model and workflow. Tune the `cost_complexity` hyperparameter. Use the same levels we used in Lab 7 -- that is, `range = c(-3, -1)`. Specify that the metric we want to optimize is `roc_auc`. 
+
+```{r}
+pokemon_tree_spec <- decision_tree(cost_complexity = tune()) %>% set_mode("classification") %>% set_engine("rpart")
+
+pokemon_tree_workflow <- workflow() %>% add_recipe(pokemon_recipe) %>% add_model(pokemon_tree_spec)
+
+param_grid_tree <- grid_regular(cost_complexity(range = c(-3, -1)), levels = 10)
+
+tune_res_tree <- tune_grid(pokemon_tree_workflow, resamples = folds, grid = param_grid_tree, metrics = metric_set(roc_auc))
+```
+
+Print an `autoplot()` of the results. What do you observe? Does a single decision tree perform better with a smaller or larger complexity penalty?
+
+```{r}
+
+autoplot(tune_res_tree)
+```
+
+As cost-complexity goes up the overall roc auc of our model goes down. There seems to be change in cost complexities on 0.007, 0.02 and 0.055. And then our model goes down really quickly. Until  roc_auc to 0.5.
+
+### Exercise 4
+
+What is the `roc_auc` of your best-performing pruned decision tree on the folds? *Hint: Use `collect_metrics()` and `arrange()`.*
+
+```{r}
+
+collect_metrics(tune_res_tree) %>% arrange(desc(mean))
+# the top result  is the best cost_complexity in roc_auc
+
+```
+
+The roc_auc of the best-performing pruned decision tree was 0.646, which has a corresponding cost_complexity of 0.001, 0.00167, 0.00278 and 0.00464. Those all had the same performance. 
+
+
+### Exercise 5
+
+Using `rpart.plot`, fit and visualize your best-performing pruned decision tree with the *training* set.
+
+```{r}
+best_parameter_tree <- select_best(tune_res_tree, metric = "roc_auc")
+best_parameter_tree
+```
+
+```{r}
+
+#finalizing workflow and fitting that model to the training data
+pokemon_tree_final <- finalize_workflow(pokemon_tree_workflow, best_parameter_tree)
+pokemon_tree_final_fit <- fit(pokemon_tree_final, data = train)
+
+
+# visualizing best performing pruned decision tree
+pokemon_tree_final_fit %>% extract_fit_engine() %>% rpart.plot(roundint = FALSE)
+
+```
+
+### Exercise 5
+
+Now set up a random forest model and workflow. Use the `ranger` engine and set `importance = "impurity"`. Tune `mtry`, `trees`, and `min_n`. Using the documentation for `rand_forest()`, explain in your own words what each of these hyperparameters represent.
+
+```{r}
+pokemon_rf_spec <- rand_forest(mtry=tune(), trees=tune(), min_n=tune()) %>% 
+  set_engine("randomForest", importance = TRUE) %>% 
+  set_mode("classification")
+
+
+pokemon_rf_workflow <- workflow() %>% 
+  add_recipe(pokemon_recipe) %>% 
+  add_model(pokemon_rf_spec)
+
+regular_grid <- grid_regular(mtry(range = c(1,8)), trees(range = c(10,1000)), min_n(range = c(1, 10)), levels = 8)
+regular_grid
+```
+
+In this part, mtry shows # of randomly selected variables we give each tree to make decisions with. And trees is the trees. I mean the # of trees we will create. min_n shows the data point in a node required to make split. 
+
+Create a regular grid with 8 levels each. You can choose plausible ranges for each hyperparameter. Note that `mtry` should not be smaller than 1 or larger than 8. **Explain why not. What type of model would `mtry = 8` represent?**
+
+Our mtry should around 1 to 8. We have total of 8 predictors. we set mtry = 8, it represent the bagging model.
+
+
+### Exercise 6
+
+Specify `roc_auc` as a metric. Tune the model and print an `autoplot()` of the results. What do you observe? What values of the hyperparameters seem to yield the best performance?
+
+```{r}
+tune_res_rf <- tune_grid(
+  pokemon_rf_workflow, 
+  resamples = folds, 
+  grid = regular_grid, 
+  metrics = metric_set(roc_auc))
+```
+
+```{r}
+
+autoplot(tune_res_rf)
+
+```
+
+In the autoplot, we clearly got the smaller node size affect performance. When # of trees above 100, it does not seem to affect performance. And those not many difference in roc auc, so 3 or 4 randomly selected predictors seems perform slightly better.
+
+
+### Exercise 7
+
+What is the `roc_auc` of your best-performing random forest model on the folds? *Hint: Use `collect_metrics()` and `arrange()`.*
+
+```{r}
+# the top results are best parameters
+collect_metrics(tune_res_rf) %>% arrange(desc(mean))
+```
+The best performing random forest model when mtry = 8, trees = 8, min_n = 3. It had an roc_auc of 0.722.
+
+```{r}
+best_rf <- select_best(tune_res_rf, metric = "roc_auc")
+best_rf
+```
+
+### Exercise 8
+
+Create a variable importance plot, using `vip()`, with your best-performing random forest model fit on the *training* set.
+
+Which variables were most useful? Which were least useful? Are these results what you expected, or not?
+
+```{r}
+#finalizing workflow and fitting that model to the training data
+pokemon_rf_final <- finalize_workflow(pokemon_rf_workflow, best_rf)
+pokemon_rf_final_fit <- fit(pokemon_rf_final, data = train)
+
+# visualizing decision tree 
+vip(pokemon_rf_final_fit %>% extract_fit_engine())
+```
+
+As the graph, the most useful is by far sp_atk. It's double larger than attack and sp_def. The least useful are generation x3 and generation_x4. And generation x3 is negative. I think this is what I expected. I do not play pokemon too much, but sp_def is useful predictor to be identifying pokemon.
+
+### Exercise 9
+
+Finally, set up a boosted tree model and workflow. Use the `xgboost` engine. Tune `trees`. Create a regular grid with 10 levels; let `trees` range from 10 to 2000. Specify `roc_auc` and again print an `autoplot()` of the results.
+
+
+```{r}
+# Set up boosted tree specification
+pokemon_boosted_spec <- boost_tree(trees=tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+#boosted tree workflow
+pokemon_boosted_workflow <- workflow() %>% 
+  add_model(pokemon_boosted_spec) %>% 
+  add_recipe(pokemon_recipe)
+
+#boosted tree tuning grid
+param_grid_boosted <- grid_regular(trees(range = c(10, 2000)),levels = 10)
+
+#resulting values with hyperparameter tuning across CV
+tune_res_boosted <- tune_grid(
+  pokemon_boosted_workflow, 
+  resamples = folds, 
+  grid = param_grid_boosted, 
+  metrics = metric_set(roc_auc))
+```
+
+```{r}
+autoplot(tune_res_boosted)
+```
+
+What do you observe?
+
+The roc auc increases. And the highest point 673 trees, then the roc auc show a gradually decreasing trend.
+
+What is the `roc_auc` of your best-performing boosted tree model on the folds? *Hint: Use `collect_metrics()` and `arrange()`.*
+
+```{r}
+# the best parameters are the top results
+collect_metrics(tune_res_boosted) %>% arrange(desc(mean))
+```
+
+```{r}
+best_paramater_boosted <- select_best(tune_res_boosted, metric = "roc_auc")
+best_paramater_boosted
+```
+
+The best_performing model had a roc_aur of 0.701 at 673 trees.
+
+### Exercise 10
+
+Display a table of the three ROC AUC values for your best-performing pruned tree, random forest, and boosted tree models. Which performed best on the folds? Select the best of the three and use `select_best()`, `finalize_workflow()`, and `fit()` to fit it to the *testing* set. 
+
+
+
+```{r}
+roc_aucs <- bind_rows(best_parameter_tree, best_rf, best_paramater_boosted)
+roc_aucs <- roc_aucs %>% add_column('model' = c("Pruned Decision Tree", "Random Forest", "Boosted Tree"),
+                        'roc_auc' = c(0.6477, 0.7070, 0.7280))
+roc_aucs[, c("model", ".config", "cost_complexity", "mtry", "trees", "min_n", "roc_auc")]
+```
+
+```{r}
+pokemon_final <- finalize_workflow(pokemon_boosted_workflow, best_paramater_boosted)
+pokemon_final_fit <- fit(pokemon_final, data = train)
+```
+
+The Boosted Tree model with 673 trees performed the best on the folds with an roc_auc of 0.728.
+
+
+Print the AUC value of your best-performing model on the testing set. Print the ROC curves. Finally, create and visualize a confusion matrix heat map.
+
+```{r}
+testing_roc_auc <- augment(pokemon_final_fit, new_data = test) %>% 
+  roc_auc(truth = type_1, estimate = c(.pred_Bug, .pred_Fire, .pred_Grass, .pred_Normal, .pred_Psychic, .pred_Water))
+testing_roc_auc
+```
+
+```{r}
+roc_curves <- augment(pokemon_final_fit, new_data = test) %>%
+  roc_curve(truth = type_1, estimate = c(.pred_Bug, .pred_Fire, .pred_Grass, .pred_Normal, .pred_Psychic, .pred_Water)) %>% 
+  autoplot()
+roc_curves
+```
+
+```{r}
+final_model_conf <- augment(pokemon_final_fit, new_data = test) %>%
+  conf_mat(truth = type_1, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+final_model_conf
+```
+
+
+Which classes was your model most accurate at predicting? Which was it worst at?
+
+In this graph, Normal, psychic and water have the good predicting. Normal types with 9 misclassifications and 18 correct ones. psychic types with 9 misclassifications and 12 correct ones. Water types with 20 misclassifications and 13 correct ones. And we could see Grass was the worst to predict because there were 0 correct classifications, and 15 misclassifications. 
